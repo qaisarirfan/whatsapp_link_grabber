@@ -27,13 +27,6 @@
     "type": "module"
   },
 
-  "permissions": [
-    "activeTab",
-    "scripting"
-  ],
-
-  "host_permissions": [
-    "https://*/*",
-    "http://*/*"
-  ]
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://*/*", "http://*/*"]
 }

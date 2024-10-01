@@ -1,13 +1,28 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { createRoot } from 'react-dom/client';
-import { load } from 'cheerio';
-import axios from 'axios';
-import styled from 'styled-components';
+import React, { useEffect, useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
+import axios from "axios";
+import styled from "styled-components";
+import pLimit from "p-limit";
+import axiosRetry from "axios-retry";
 
-import { copyToClipboard, inviteLink, isGoogle } from './utils';
+import {
+  copyToClipboard,
+  extractWhatsappLinks,
+  fetchData,
+  handleError,
+  inviteLink,
+  isGoogle,
+  parseUrl,
+} from "./utils";
+import Header from "./components/Header";
+import Actions from "./components/Actions";
+import Links from "./components/Links";
+import Logs from "./components/Logs";
+import { GOOGLE_SEARCH_URL } from "./constants";
+import googleAnalytics from "../scripts/google-analytics";
 
 const Container = styled.div`
-  max-width: 700px;
+  max-width: 800px;
   min-height: calc(100vh - 60px);
   min-width: 500px;
   padding: 12px;
@@ -15,64 +30,34 @@ const Container = styled.div`
   position: relative;
 `;
 
-const StatusBarContainer = styled.div`
-  align-items: center;
-  background: #fff;
-  display: flex;
-  flex-direction: row;
-  flex-wrap: nowrap;
-  justify-content: space-between;
-  left: 12px;
-  padding-bottom: 12px;
-  padding-top: 12px;
-  position: sticky;
-  right: 12px;
-  top: 0;
-`;
-
-const Item = styled.li`
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-
-  a {
-    margin-right: 4px;
-  }
-`;
-
 const ExtractButton = styled.button`
-  &::after{
+  &::after {
     border-color: #000;
     border-top-color: transparent;
     border-right-color: transparent;
   }
 `;
 
-const StyledHeader = styled.header`
-  align-items: center;
-  display: flex;
-  flex-direction: row;
-  padding: 8px;
+// Configure Axios to retry failed requests
+axiosRetry(axios, {
+  retries: 3, // Retry failed requests up to 3 times
+  retryDelay: axiosRetry.exponentialDelay, // Exponential backoff
+  retryCondition: (error) =>
+    error.response?.status === 429 ||
+    axiosRetry.isNetworkOrIdempotentRequestError(error),
+});
 
-  .logo {
-    width: 70%;
-    display: flex;
-    align-items: center;
+// Fire a page view event on load
+window.addEventListener("load", () => {
+  googleAnalytics.firePageViewEvent(document.title, document.location.href);
+});
 
-    img {
-      height: auto;
-      margin-right: 16px;
-      width: 32px;
-    }
-
-    p {
-      font-size: 18px;
-    }
+// Listen globally for all button events
+document.addEventListener("click", (event) => {
+  if (event.target instanceof HTMLButtonElement) {
+    googleAnalytics.fireEvent("click_button", { id: event.target.id });
   }
-  .buymeacoffee {
-    width: 30%;
-  }
-`;
+});
 
 function Popup() {
   const [currentURL, setCurrentURL] = useState();
@@ -86,20 +71,31 @@ function Popup() {
   const [logs, setLogs] = useState([]);
   const [otherLinks, setOtherLinks] = useState([]);
 
-  const bottomRef = useRef(null);
-
   const isGoogleSearchPage = isGoogle(currentURL);
 
+  const searchLinks = useMemo(
+    () => googleSearchLinks.filter((val) => !val.includes(GOOGLE_SEARCH_URL)),
+    [googleSearchLinks],
+  );
+
   const getAllAnchorTags = () => {
-    const isGoogleSearch = `${window?.location?.origin}${window?.location?.pathname}` === 'https://www.google.com/search';
-    let tags = document.getElementsByTagName('a');
+    const isGoogleSearch =
+      `${window?.location?.origin}${window?.location?.pathname}` ===
+      "https://www.google.com/search";
+
+    const path = new URL(window.location);
+    console.log(path.searchParams.get("q"));
+
+    let tags = document.getElementsByTagName("a");
     if (isGoogleSearch) {
-      tags = document.querySelectorAll('#search a');
+      tags = document.querySelectorAll("#search a");
     }
     const ls = [];
     for (let idx = 0; idx < tags.length; idx += 1) {
       const value = tags[idx];
-      const res = value.href.match(/(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._\\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\\+.~#?&//=]*)/g);
+      const res = value.href.match(
+        /(http(s)?:\/\/.)?(www\.)?[-a-zA-Z0-9@:%._\\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\\+.~#?&//=]*)/g,
+      );
       if (res !== null) {
         ls.push(value.href);
       }
@@ -108,229 +104,202 @@ function Popup() {
   };
 
   useEffect(() => {
-    chrome.tabs.query({ active: true, windowId: chrome.windows.WINDOW_ID_CURRENT }, (tabs) => {
-      const { url, id } = tabs[0];
-      setCurrentURL(url);
-      chrome.scripting.executeScript({
-        target: { tabId: id },
-        func: getAllAnchorTags,
-      }, (injectionResults) => {
-        let linksFrom = [];
-        injectionResults?.forEach(({ result }) => {
-          linksFrom = [...linksFrom, ...result];
-        });
-        if (!isGoogle(url)) {
-          const whatsappLink = linksFrom.map((val) => inviteLink(val)).filter((val) => val);
-          if (whatsappLink.length > 0) {
-            setLinks([...new Set(whatsappLink)]);
-          } else {
-            setOtherLinks([...new Set(linksFrom)]);
-          }
-        } else {
-          setGoogleSearchLinks([...new Set(linksFrom)]);
-        }
-      });
-    });
+    chrome.tabs.query(
+      { active: true, windowId: chrome.windows.WINDOW_ID_CURRENT },
+      (tabs) => {
+        const { url, id } = tabs[0];
+        setCurrentURL(url);
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: id },
+            func: getAllAnchorTags,
+          },
+          (injectionResults) => {
+            let linksFrom = [];
+            injectionResults?.forEach(({ result }) => {
+              linksFrom = [...linksFrom, ...result];
+            });
+
+            googleAnalytics.fireEvent("search", { q: "test" });
+
+            if (!isGoogle(url)) {
+              const whatsappLink = linksFrom
+                .map((val) => inviteLink(val))
+                .filter((val) => val);
+              if (whatsappLink.length > 0) {
+                setLinks([...new Set(whatsappLink)]);
+              } else {
+                setOtherLinks([...new Set(linksFrom)]);
+              }
+            } else {
+              setGoogleSearchLinks([...new Set(linksFrom)]);
+            }
+          },
+        );
+      },
+    );
   }, []);
+
+  const logResults = (log, waLinks) => {
+    setLogs((prevState) => [
+      ...prevState,
+      {
+        ...log,
+        count: waLinks.length,
+      },
+    ]);
+  };
 
   const getWhatsappLink = async (val) => {
     const waLinks = [];
-    const tmpLogs = {
+    const tmpLog = {
       count: 0,
       errorMessage: null,
       hasError: false,
-      link: new URL(val).origin,
-      href: new URL(val).href,
+      ...parseUrl(val),
     };
+
     try {
-      const { data } = await axios.get(val, { timeout: 10000 });
-      const $ = load(data);
-      const a = $('a');
-      // eslint-disable-next-line array-callback-return
-      $(a).map((i, ele) => {
-        const link = inviteLink($(ele).attr('href'));
-        if (link) { waLinks.push(link); }
-      });
+      const { data } = await fetchData(val);
+      const extractedLinks = extractWhatsappLinks(data);
+      waLinks.push(...extractedLinks);
     } catch (error) {
-      tmpLogs.hasError = true;
-      tmpLogs.errorMessage = new Error(error).message.replace('AxiosError: ', '');
+      Object.assign(tmpLog, handleError(error.message));
     }
-    setLogs((prevState) => ([
-      ...prevState,
-      ...[{
-        ...tmpLogs,
-        count: waLinks.length,
-      }],
-    ]));
+    logResults(tmpLog, waLinks);
     return waLinks;
   };
 
-  const fetch = async () => {
+  const fetchAll = async () => {
+    const limit = pLimit(50); // Allow up to 50 concurrent requests
     setHasCopyAsJSON(false);
     setHasCopyAsText(false);
     setLinks([]);
     setLoading(true);
     setLogs([]);
     let store = [];
-    const promise = googleSearchLinks.map((link) => getWhatsappLink(link));
+
+    const promises = searchLinks.map((link) =>
+      limit(() => getWhatsappLink(link)),
+    );
+
     try {
-      const res = await Promise.all(promise);
+      const res = await Promise.allSettled(promises);
+
       res.forEach((r) => {
-        store = [...store, ...r];
+        if (r.status === "fulfilled" && r.value) {
+          store = [...store, ...r.value];
+        } else if (r.status === "rejected") {
+          console.error(`Failed to fetch link: ${r.reason}`);
+        }
       });
-      setLinks([...new Set(store)]);
-    } catch {
-      throw Error('Promise failed');
+      const uniqueLinks = [...new Set(store)];
+      setLinks(uniqueLinks);
+    } catch (error) {
+      console.error("Error fetching Google search links:", error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  const onCopyAsTextHandler = async () => {
+  const handleCopy = async (format) => {
+    const isTextFormat = format === "text";
+
     setHasCopyAsJSON(false);
     setHasCopyAsText(false);
-    setIsCopyAsText(true);
+
+    if (isTextFormat) {
+      setIsCopyAsText(true);
+    } else {
+      setIsCopyAsJSON(true);
+    }
+
     try {
-      const text = links.join('\r\n');
-      await copyToClipboard(text);
-      setIsCopyAsText(false);
-      setHasCopyAsText(true);
+      const content = isTextFormat ? links.join("\r\n") : JSON.stringify(links);
+      await copyToClipboard(content);
+
+      if (isTextFormat) {
+        setIsCopyAsText(false);
+        setHasCopyAsText(true);
+      } else {
+        setIsCopyAsJSON(false);
+        setHasCopyAsJSON(true);
+      }
     } catch (error) {
-      setIsCopyAsText(false);
-      setHasCopyAsText(false);
+      console.error("Failed to copy to clipboard:", error);
+
+      if (isTextFormat) {
+        setIsCopyAsText(false);
+        setHasCopyAsText(false);
+      } else {
+        setIsCopyAsJSON(false);
+        setHasCopyAsJSON(false);
+      }
     }
   };
-
-  const onCopyAsJSONHandler = async () => {
-    setHasCopyAsText(false);
-    setIsCopyAsJSON(true);
-    setHasCopyAsJSON(false);
-    try {
-      const text = JSON.stringify(links);
-      await copyToClipboard(text);
-      setIsCopyAsJSON(false);
-      setHasCopyAsJSON(true);
-    } catch (error) {
-      setIsCopyAsJSON(false);
-      setHasCopyAsJSON(false);
-    }
-  };
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
-
-  const buttonClasses = ['size-small', 'shadow-hard', 'bg-blue', 'text-white', 'with-loader'];
-  let copyAsTextButton = [...buttonClasses];
-  if (!isCopyAsText) {
-    copyAsTextButton = copyAsTextButton.filter((val) => val !== 'with-loader');
-  }
-  if (hasCopyAsText) {
-    copyAsTextButton = copyAsTextButton.filter((val) => val !== 'bg-blue');
-    copyAsTextButton.push('bg-green');
-  }
-
-  let copyAsJSONButton = [...buttonClasses];
-  if (!isCopyAsJSON) {
-    copyAsJSONButton = copyAsJSONButton.filter((val) => val !== 'with-loader');
-  }
-  if (hasCopyAsJSON) {
-    copyAsJSONButton = copyAsJSONButton.filter((val) => val !== 'bg-blue');
-    copyAsJSONButton.push('bg-green');
-  }
 
   return (
     <>
-      <StyledHeader className="ff-card bg-white">
-        <div className="logo">
-          <img src="./images/logo.png" alt="logo" />
-          <p>Grab whatsapp group invite links</p>
-        </div>
-        <a className="buymeacoffee" href="https://www.buymeacoffee.com/qaisarirfan" target="_blank" rel="noreferrer">
-          <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" />
-        </a>
-      </StyledHeader>
-      <Container>
-        <StatusBarContainer>
-          <div>{links.length > 0 && <p>{`Total: ${links.length}`}</p>}</div>
-          <div>
-            {(isGoogleSearchPage && links.length > 0) && (
-              <button
-                className={`size-small bg-yellow shadow-hard ${isLoading && 'with-loader'}`}
-                type="button"
-                onClick={fetch}
-                disabled={isLoading}
-              >
-                Extract again
-              </button>
-            )}
-            <button
-              className={copyAsTextButton.join(' ')}
-              type="button"
-              onClick={onCopyAsTextHandler}
-              disabled={links.length < 1}
-            >
-              {`${hasCopyAsText ? 'Copied' : 'Copy'} as Text`}
-            </button>
-            <button
-              className={copyAsJSONButton.join(' ')}
-              type="button"
-              onClick={onCopyAsJSONHandler}
-              disabled={links.length < 1}
-            >
-              {`${hasCopyAsJSON ? 'Copied' : 'Copy'} as JSON`}
-            </button>
-          </div>
-        </StatusBarContainer>
+      <Header />
+      <Container
+        style={{
+          ...(links.length === 0 &&
+            logs.length === 0 && {
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "center",
+            }),
+        }}
+      >
         {links.length > 0 && (
-          <table className="ff-table bordered-rows full-width striped padding-tiny">
-            <tbody>
-              {links.map((link) => (
-                <tr key={link}>
-                  <td><a className="font-mono text-small" target="_blank" href={link} rel="noreferrer">{link}</a></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <>
+            <Actions
+              links={links}
+              isLoading={isLoading}
+              hasCopyAsJSON={hasCopyAsJSON}
+              hasCopyAsText={hasCopyAsText}
+              isCopyAsJSON={isCopyAsJSON}
+              isCopyAsText={isCopyAsText}
+              isGoogleSearchPage={isGoogleSearchPage}
+              onCopy={handleCopy}
+              onFetch={fetchAll}
+            />
+            <Links links={links} />
+          </>
         )}
-        {(!isGoogleSearchPage && links.length < 1) && (
+        {!isGoogleSearchPage && links.length < 1 && (
           <p className="text-centre">{`There is no WhatsApp group link on this page but you found ${otherLinks.length} other links.`}</p>
         )}
-        {(isGoogleSearchPage && links.length < 1) && (
+        {isGoogleSearchPage && links.length < 1 && (
           <>
-            <p className="text-centre">Extract WhatsApp group links from Google search result</p>
+            <p className="text-centre">
+              Extract WhatsApp group links from Google search result (
+              {searchLinks.length})
+            </p>
             <div className="text-center">
               <ExtractButton
-                className={`bg-yellow shadow-hard ${isLoading && 'with-loader'}`}
+                className={`shape-rounded bg-yellow shadow-hard ${isLoading && "with-loader"}`}
                 type="button"
                 onClick={fetch}
                 disabled={isLoading}
               >
-                Extract
+                Extract {logs.length > 0 && links.length === 0 ? "again" : null}
               </ExtractButton>
             </div>
           </>
         )}
-        {(isGoogleSearchPage && links.length < 1) && (
-          <ul style={{ height: 'calc(100vh - 200px)', overflow: 'auto' }}>
-            {logs.map((log, index) => (
-              <Item
-                // eslint-disable-next-line react/no-array-index-key
-                key={`${log?.link}-${index}`}
-                style={{ color: log?.hasError ? 'red' : 'inherit' }}
-                className="font-mono text-small"
-              >
-                <a target="_blank" href={log?.href} rel="noreferrer">{log?.link}</a>
-                {log?.count > 0 && <p>{` - finds ${log?.count} links`}</p>}
-                {log?.errorMessage && <span>{log?.errorMessage}</span>}
-              </Item>
-            ))}
-            <li ref={bottomRef} />
-          </ul>
+
+        {isGoogleSearchPage && links.length === 0 && logs.length > 0 && (
+          <Logs logs={logs} />
         )}
       </Container>
     </>
   );
 }
 
-const root = createRoot(document.getElementById('root'));
-root.render(<React.StrictMode><Popup /></React.StrictMode>);
+const root = createRoot(document.getElementById("root"));
+root.render(
+  <React.StrictMode>
+    <Popup />
+  </React.StrictMode>,
+);
