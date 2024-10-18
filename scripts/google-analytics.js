@@ -3,10 +3,8 @@ const GA_DEBUG_ENDPOINT = "https://www.google-analytics.com/debug/mp/collect";
 
 // Get via https://developers.google.com/analytics/devguides/collection/protocol/ga4/sending-events?client_type=gtag#recommended_parameters_for_reports
 const MEASUREMENT_ID = "G-3572BGLY9E";
-// const MEASUREMENT_ID = "G-9S9H43Y54R";
-const API_SECRET = "AIzaSyClhw-NUiNwC_r78LOdO-I9NuYOZehyGy8";
+const API_SECRET = "AIzaSyA0wKDzOkKzG_DYiOi0dz5LqIT9TQZloZ0";
 const DEFAULT_ENGAGEMENT_TIME_MSEC = 100;
-const FIREBASE_APP_ID = `1:548954488474:web:3c7811956358ea07b9e923`;
 
 // Duration of inactivity after which a new session is created
 const SESSION_EXPIRATION_IN_MIN = 30;
@@ -14,6 +12,12 @@ const SESSION_EXPIRATION_IN_MIN = 30;
 class Analytics {
   constructor(debug = false) {
     this.debug = debug;
+    this.init();
+  }
+
+  async init() {
+    this.clientId = await this.getOrCreateClientId();
+    this.sessionId = await this.getOrCreateSessionId();
   }
 
   // Returns the client id, or creates a new one if one doesn't exist.
@@ -23,7 +27,7 @@ class Analytics {
     let { clientId } = await chrome.storage.local.get("clientId");
     if (!clientId) {
       // Generate a unique client ID, the actual value is not relevant
-      clientId = self.crypto.randomUUID();
+      clientId = window.crypto.randomUUID();
       await chrome.storage.local.set({ clientId });
     }
     return clientId;
@@ -62,20 +66,18 @@ class Analytics {
 
   // Fires an event with optional params. Event names must only include letters and underscores.
   async fireEvent(name, params = {}) {
-    // Configure session id and engagement time if not present, for more details see:
-    // https://developers.google.com/analytics/devguides/collection/protocol/ga4/sending-events?client_type=gtag#recommended_parameters_for_reports
-    if (!params.session_id) {
-      params.session_id = await this.getOrCreateSessionId();
-    }
-    if (!params.engagement_time_msec) {
-      params.engagement_time_msec = DEFAULT_ENGAGEMENT_TIME_MSEC;
-    }
+    const newParams = {
+      session_id: params.session_id || (await this.getOrCreateSessionId()),
+      engagement_time_msec:
+        params.engagement_time_msec || DEFAULT_ENGAGEMENT_TIME_MSEC,
+      ...params,
+    };
+
+    console.log(newParams);
 
     try {
       const response = await fetch(
-        `${
-          this.debug ? GA_DEBUG_ENDPOINT : GA_ENDPOINT
-        }?firebase_app_id=${MEASUREMENT_ID}&api_secret=${API_SECRET}`,
+        `${this.debug ? GA_DEBUG_ENDPOINT : GA_ENDPOINT}?measurement_id=${MEASUREMENT_ID}&api_secret=${API_SECRET}`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -83,16 +85,15 @@ class Analytics {
             events: [
               {
                 name,
-                params,
+                params: newParams, // Use the new merged object here
               },
             ],
           }),
         },
       );
-      if (!this.debug) {
-        return;
+      if (this.debug) {
+        console.log(await response.text());
       }
-      console.log(await response.text());
     } catch (e) {
       console.error("Google Analytics request failed with an exception", e);
     }

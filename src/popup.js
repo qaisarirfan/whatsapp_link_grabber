@@ -39,25 +39,13 @@ const ExtractButton = styled.button`
 `;
 
 // Configure Axios to retry failed requests
-axiosRetry(axios, {
-  retries: 3, // Retry failed requests up to 3 times
-  retryDelay: axiosRetry.exponentialDelay, // Exponential backoff
-  retryCondition: (error) =>
-    error.response?.status === 429 ||
-    axiosRetry.isNetworkOrIdempotentRequestError(error),
-});
-
-// Fire a page view event on load
-window.addEventListener("load", () => {
-  googleAnalytics.firePageViewEvent(document.title, document.location.href);
-});
-
-// Listen globally for all button events
-document.addEventListener("click", (event) => {
-  if (event.target instanceof HTMLButtonElement) {
-    googleAnalytics.fireEvent("click_button", { id: event.target.id });
-  }
-});
+// axiosRetry(axios, {
+//   retries: 3, // Retry failed requests up to 3 times
+//   retryDelay: axiosRetry.exponentialDelay, // Exponential backoff
+//   retryCondition: (error) =>
+//     error.response?.status === 429 ||
+//     axiosRetry.isNetworkOrIdempotentRequestError(error),
+// });
 
 function Popup() {
   const [currentURL, setCurrentURL] = useState();
@@ -82,9 +70,6 @@ function Popup() {
     const isGoogleSearch =
       `${window?.location?.origin}${window?.location?.pathname}` ===
       "https://www.google.com/search";
-
-    const path = new URL(window.location);
-    console.log(path.searchParams.get("q"));
 
     let tags = document.getElementsByTagName("a");
     if (isGoogleSearch) {
@@ -189,14 +174,10 @@ function Popup() {
       res.forEach((r) => {
         if (r.status === "fulfilled" && r.value) {
           store = [...store, ...r.value];
-        } else if (r.status === "rejected") {
-          console.error(`Failed to fetch link: ${r.reason}`);
         }
       });
       const uniqueLinks = [...new Set(store)];
       setLinks(uniqueLinks);
-    } catch (error) {
-      console.error("Error fetching Google search links:", error);
     } finally {
       setLoading(false);
     }
@@ -226,8 +207,6 @@ function Popup() {
         setHasCopyAsJSON(true);
       }
     } catch (error) {
-      console.error("Failed to copy to clipboard:", error);
-
       if (isTextFormat) {
         setIsCopyAsText(false);
         setHasCopyAsText(false);
@@ -280,7 +259,7 @@ function Popup() {
               <ExtractButton
                 className={`shape-rounded bg-yellow shadow-hard ${isLoading && "with-loader"}`}
                 type="button"
-                onClick={fetch}
+                onClick={fetchAll}
                 disabled={isLoading}
               >
                 Extract {logs.length > 0 && links.length === 0 ? "again" : null}
